@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gatedtrain-pack-text-gsm8k"
+version = "0.1.0"
+description = "GSM8K text scenario pack for the gatedtrain post-training framework"
+readme = "README.md"
+requires-python = ">=3.12,<3.14"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE", "THIRD_PARTY_NOTICES.md"]
+dependencies = ["gatedtrain>=0.5,<0.6"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+gatedtrain_pack_text_gsm8k = [
+    "generate_vllm.py",
+    "pipeline.yaml",
+    "train_grpo.py",
+    "prompt.txt",
+    "eval-requirements.txt",
+    "runtime/*",
+    "eval/*",
+]
+
+[project.scripts]
+gatedtrain-pack-text-gsm8k-data = "gatedtrain_pack_text_gsm8k.data:main"
+
+[project.entry-points."gatedtrain.scenarios"]
+text-gsm8k = "gatedtrain_pack_text_gsm8k.scenario:SCENARIO"
+
+[project.entry-points."gatedtrain.stages"]
+gsm8k_profile_data = "gatedtrain_pack_text_gsm8k.stages:ProfileData"
+gsm8k_choose_task_and_base = "gatedtrain_pack_text_gsm8k.stages:ChooseTaskAndBase"
+gsm8k_build_train_set = "gatedtrain_pack_text_gsm8k.stages:BuildTrainSet"
+gsm8k_write_recipe = "gatedtrain_pack_text_gsm8k.stages:WriteRecipe"
+gsm8k_smoke = "gatedtrain_pack_text_gsm8k.stages:Smoke"
+gsm8k_train = "gatedtrain_pack_text_gsm8k.stages:Train"
+
+[project.entry-points."gatedtrain.adapters"]
+text-gsm8k-grpo = "gatedtrain_pack_text_gsm8k.adapter:PLUGIN"

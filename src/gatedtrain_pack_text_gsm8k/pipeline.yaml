@@ -1,0 +1,48 @@
+# The GSM8K text pack's pipeline (scenario `text-gsm8k`): a keeper project only, since the models are evaluated by
+# the batch generator `text_gsm8k_vllm` in the keeper's inference container.
+#
+# Four params have no usable default and are null here; a stage refuses to run until they are set. Copy this file,
+# set them, and pass the copy to `gatedtrain project create --pipeline <copy> --keeper <socket>`:
+#
+#   choose_task_and_base.base_model_dir  the absolute path of the Qwen/Qwen3-0.6B model directory downloaded on the
+#                                        host at the pinned commit (e.g. /srv/gatedtrain/models/Qwen3-0.6B)
+#   smoke.image, train.image             the recipe's CUDA devel image pinned by digest, held by the owner's rootless
+#                                        Docker daemon (no job pulls an image), e.g.
+#                                        docker.io/nvidia/cuda:13.0.3-devel-ubuntu24.04@sha256:<digest>
+#   smoke.runtime_dir, train.runtime_dir the runtime directory holding the owner-built `.venv` (from runtime/uv.lock,
+#                                        built without bytecode; job.py says how), e.g. /srv/gatedtrain/runtime-gsm8k
+#   smoke.python_dir, train.python_dir   the directory of uv-managed interpreters the venv was made from, e.g.
+#                                        /srv/gatedtrain/python
+#
+# smoke and train take the same three values. The step names are the usual ones, so the artifacts keep their names;
+# the stage types carry the pack's `gsm8k_` prefix.
+name: text-gsm8k
+stages:
+  - {name: intake_seal, stage: intake_seal}
+  - {name: profile_data, stage: gsm8k_profile_data,
+     inputs: {train_part: intake_seal.train_part}}
+  - {name: choose_task_and_base, stage: gsm8k_choose_task_and_base,
+     params: {base_model_dir: null},
+     inputs: {profile: profile_data.profile}}
+  - {name: preregister, stage: preregister,
+     inputs: {sealed_summary: intake_seal.sealed_summary, deployment: choose_task_and_base.deployment,
+              base_model: choose_task_and_base.base}}
+  - {name: build_train_set, stage: gsm8k_build_train_set,
+     inputs: {train_part: intake_seal.train_part}}
+  - {name: write_recipe, stage: gsm8k_write_recipe,
+     inputs: {train_set: build_train_set.train_set}}
+  - {name: smoke, stage: gsm8k_smoke,
+     params: {image: null, runtime_dir: null, python_dir: null},
+     inputs: {base: choose_task_and_base.base, train_set: build_train_set.train_set, recipe: write_recipe.recipe}}
+  - {name: train, stage: gsm8k_train,
+     params: {image: null, runtime_dir: null, python_dir: null},
+     inputs: {base: choose_task_and_base.base, train_set: build_train_set.train_set, recipe: write_recipe.recipe,
+              smoke: smoke.smoke}}
+  - {name: evaluate_sealed, stage: evaluate_sealed,
+     inputs: {registration: preregister.registration, baseline_model: choose_task_and_base.base,
+              candidate_model: train.model}}
+  - {name: gate, stage: gate,
+     inputs: {registration: preregister.registration, baseline_records: evaluate_sealed.baseline_records,
+              candidate_records: evaluate_sealed.candidate_records}}
+  - {name: report, stage: report,
+     inputs: {registration: preregister.registration, power: intake_seal.power, gate_result: gate.gate_result}}
