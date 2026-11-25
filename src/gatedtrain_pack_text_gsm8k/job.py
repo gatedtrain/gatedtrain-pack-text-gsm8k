@@ -9,11 +9,12 @@ file, the prompt file, the script and the base model directory. The output is /o
 
 The runtime directory `<runtime>` is the adapter's (adapter.py `RUNTIME`): `GATEDTRAIN_PACK_TEXT_GSM8K_RUNTIME`, else
 this package's `runtime/`. It holds copies of `runtime/pyproject.toml` and `runtime/uv.lock`; the owner builds the
-venv there on the host (no GPU), without bytecode, from a uv-managed CPython 3.12.16 in `<python>`:
+venv there on the host (no GPU), without bytecode, from the uv-managed CPython `PYTHON_VERSION` in `<python>`
+(`<platform>` is the platform tag `uv python install` gives the directory, e.g. what `uv python find` prints):
 
     cd <runtime>
     env -u UV_COMPILE_BYTECODE UV_PROJECT_ENVIRONMENT=$PWD/.venv UV_LINK_MODE=copy UV_PYTHON_DOWNLOADS=never \\
-        uv sync --frozen --python <python>/cpython-3.12.16-linux-x86_64-gnu/bin/python3.12
+        uv sync --frozen --python <python>/cpython-<PYTHON_VERSION>-<platform>/bin/python3.12
 
 (no `--compile-bytecode`). The backend's job key fingerprints every entry of the read-only mounts and refuses past
 `gatedtrain.ainative.backend.MAX_INPUT_ENTRIES` (100,000); a venv with compiled bytecode exceeds it. The mounts are
@@ -28,6 +29,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import stat
 from pathlib import Path
 
@@ -40,8 +42,10 @@ from . import adapter
 from .adapter import FRAMEWORK_PACKAGE, NAME
 
 RULE = "TXT-4"
+PYTHON_VERSION = "3.12.16"           # the CPython the runtime venv is built from (runtime/README, the recipe's pin)
 BUILD = ("cd <runtime>; env -u UV_COMPILE_BYTECODE UV_PROJECT_ENVIRONMENT=$PWD/.venv UV_LINK_MODE=copy "
-         "UV_PYTHON_DOWNLOADS=never uv sync --frozen --python <python>/cpython-3.12.16-linux-x86_64-gnu/bin/python3.12")
+         "UV_PYTHON_DOWNLOADS=never uv sync --frozen "
+         f"--python <python>/cpython-{PYTHON_VERSION}-<platform>/bin/python3.12")
 
 PACKAGE_DIR = Path(__file__).resolve().parent
 TRAIN_SCRIPT = PACKAGE_DIR / "train_grpo.py"
@@ -51,9 +55,26 @@ LOCK_FILE = PACKAGE_DIR / "runtime" / "uv.lock"
 # The recipe's base image (its runtime/README.md "Pins"), pinned by digest.
 IMAGE = ("docker.io/nvidia/cuda:13.0.3-devel-ubuntu24.04"
          "@sha256:b7ae301dea2c162444795462ce17a05f6a516e5a75944b57af5b88540a1a2266")
-FRAMEWORK = {"name": FRAMEWORK_PACKAGE, "version": "1.16.0", "commit": None}   # trl, as runtime/uv.lock pins it
 
-# The recipe's environment (its runtime/README.md "Command shape"). TORCH_CUDA_ARCH_LIST 8.9 is the recipe host's GPU.
+
+def _locked_version(package: str) -> str:
+    """The version `runtime/uv.lock` pins for `package`: the lock is the one place a pin lives."""
+    import tomllib
+
+    try:
+        found = [p["version"] for p in tomllib.loads(LOCK_FILE.read_text(encoding="utf-8"))["package"]
+                 if p["name"] == package]
+    except (OSError, ValueError, KeyError) as exc:
+        raise RuntimeError(f"cannot read the pinned {package} version from {LOCK_FILE}: {exc}") from exc
+    if len(found) != 1:
+        raise RuntimeError(f"{LOCK_FILE} must pin {package} exactly once; it lists {len(found)} entries")
+    return found[0]
+
+
+FRAMEWORK = {"name": FRAMEWORK_PACKAGE, "version": _locked_version(FRAMEWORK_PACKAGE), "commit": None}   # trl
+
+# The recipe's environment (its runtime/README.md "Command shape"). It names no GPU: `TORCH_CUDA_ARCH_LIST` is the
+# architecture of the owner's GPU, so a stage parameter (`cuda_arch`, `train_job`'s argument) adds it.
 ENV = {
     "DO_NOT_TRACK": "1",
     "FLASHINFER_WORKSPACE_BASE": "/tmp/cache",
@@ -65,7 +86,6 @@ ENV = {
     "PYTHONUNBUFFERED": "1",
     "TOKENIZERS_PARALLELISM": "false",
     "TORCHINDUCTOR_CACHE_DIR": "/tmp/cache/inductor",
-    "TORCH_CUDA_ARCH_LIST": "8.9",
     "TRANSFORMERS_OFFLINE": "1",
     "TRITON_CACHE_DIR": "/tmp/cache/triton",
     "VLLM_CACHE_ROOT": "/tmp/cache/vllm",
@@ -77,8 +97,8 @@ ENV = {
 
 # train_grpo.py PROFILES: smoke 10 steps, full 100 steps, both 32 prompts x 8 generations per step.
 PROFILES = {
-    "smoke": {"gpu_hours_est": 0.25, "time_limit_s": 3600},
-    "full": {"gpu_hours_est": 1.5, "time_limit_s": 14400},
+    "smoke": {"gpu_hours_est": adapter.GPU_H_ESTIMATE["smoke"], "time_limit_s": 3600},
+    "full": {"gpu_hours_est": adapter.GPU_H_ESTIMATE["full"], "time_limit_s": 14400},
 }
 
 
@@ -123,11 +143,12 @@ def check_runtime(runtime_dir: Path | str | None = None) -> str:
     if runtime_dir is not None and os.path.realpath(runtime_dir) != os.path.realpath(runtime):
         raise _refused(f"runtime directory {runtime_dir} is not the adapter's {runtime}, whose venv the adapter row "
                        "names as the interpreter",
-                       f"set {adapter.RUNTIME_ENV}={runtime_dir} in the environment of every gatedtrain process that "
-                       "runs smoke or train (the adapter reads it at import)")
+                       f"set `runtime_dir = \"{runtime_dir}\"` in the [packs.{adapter.PACK}] table of the host file "
+                       "(the adapter reads it at import)")
     if not os.path.isfile(Path(runtime) / ".venv" / "bin" / "python"):
         raise _refused(f"the runtime directory {runtime} has no .venv/bin/python",
-                       f"set {adapter.RUNTIME_ENV} to the directory holding the runtime venv, built with: {BUILD}")
+                       f"set `runtime_dir` in the [packs.{adapter.PACK}] table of the host file to the directory holding "
+                       f"the runtime venv, built with: {BUILD}")
     lock = Path(runtime) / "uv.lock"
     try:
         got = hashlib.sha256(lock.read_bytes()).hexdigest()
@@ -141,15 +162,31 @@ def check_runtime(runtime_dir: Path | str | None = None) -> str:
     return runtime
 
 
+# One capability is `<major>.<minor>` with an optional arch suffix (`9.0a`) or `+PTX`; several are separated by single
+# spaces, the one separator both PyTorch and FlashInfer read (`;` is PyTorch's alone).
+_CUDA_ARCH = re.compile(r"[0-9]+\.[0-9]+[a-z]?(?:\+PTX)?(?: [0-9]+\.[0-9]+[a-z]?(?:\+PTX)?)*")
+MAX_CUDA_ARCH_CHARS = 64
+
+
+def valid_cuda_arch(value: object) -> bool:
+    """Whether `value` is a `TORCH_CUDA_ARCH_LIST`: compute capabilities such as `8.9`, `9.0a`, `9.0+PTX`, separated by
+    single spaces, at most `MAX_CUDA_ARCH_CHARS` long."""
+    return isinstance(value, str) and len(value) <= MAX_CUDA_ARCH_CHARS and _CUDA_ARCH.fullmatch(value) is not None
+
+
 def train_job(*, profile: str, image: str, python_dir: Path, inputs_dir: Path, base_dir: Path, seed: int,
-              runtime_dir: Path | None = None) -> Job:
+              runtime_dir: Path | None = None, cuda_arch: str | None = None) -> Job:
     """The training job of `profile` (smoke or full). `inputs_dir` holds `train.jsonl`, `prompt.txt` and
     `train_grpo.py`; `base_dir` is the base model directory; `python_dir` holds the interpreter tree the venv was made
     from. `runtime_dir` defaults to the adapter's runtime directory and must be that directory. ValueError for another
     profile; Refused (TXT-4) for a runtime directory `check_runtime` refuses, or read-only inputs over the job key's
-    entry limit. The runtime's `venv_lock` is `<runtime>/uv.lock`, the lock the venv was built from."""
+    entry limit. The runtime's `venv_lock` is `<runtime>/uv.lock`, the lock the venv was built from. `cuda_arch`, the
+    GPU architecture list of the owner's host, sets `TORCH_CUDA_ARCH_LIST` (left out when None); ValueError when it
+    is not a list of compute capabilities."""
     if profile not in PROFILES:
         raise ValueError(f"profile {profile!r} is not one of {', '.join(PROFILES)}")
+    if cuda_arch is not None and not valid_cuda_arch(cuda_arch):
+        raise ValueError(f"cuda_arch {cuda_arch!r} is not a list of compute capabilities such as '8.9'")
     runtime = check_runtime(runtime_dir)
     python, inputs = Path(python_dir), Path(inputs_dir)
     venv = f"{runtime}/.venv"             # the interpreter's venv; the mount is the runtime directory holding it
@@ -160,7 +197,7 @@ def train_job(*, profile: str, image: str, python_dir: Path, inputs_dir: Path, b
         framework=dict(FRAMEWORK),
         argv=(f"{venv}/bin/python", "/inputs/train_grpo.py", "--profile", profile, "--out", "/out",
               "--seed", str(seed)),
-        env=dict(ENV),
+        env={**ENV, **({"TORCH_CUDA_ARCH_LIST": cuda_arch} if cuda_arch is not None else {})},
         mounts=(Mount(runtime, runtime), Mount(str(python), str(python)),
                 Mount(str(inputs / "train.jsonl"), "/inputs/train.jsonl"),
                 Mount(str(inputs / "prompt.txt"), "/inputs/prompt.txt"),

@@ -1,6 +1,6 @@
 # gatedtrain-pack-text-gsm8k
 
-A scenario pack for [gatedtrain](https://github.com/gatedtrain/gatedtrain) (`gatedtrain>=0.7,<0.8`): it teaches a small
+A scenario pack for [gatedtrain](https://github.com/gatedtrain/gatedtrain) (`gatedtrain>=0.7.1,<0.8`): it teaches a small
 language model grade-school math and lets gatedtrain decide, by a rule fixed before training, whether the trained
 model really is better.
 
@@ -173,9 +173,9 @@ Everything in this section runs as the owner. The paths are examples; `/srv/gate
 
 2. Build the training runtime venv with a uv-managed CPython 3.12. The runtime directory holds the pack's copies of
    `runtime/pyproject.toml` and `runtime/uv.lock` (the recipe's lock). Copy them out of the installed package into a
-   directory of yours, **and** set `GATEDTRAIN_PACK_TEXT_GSM8K_RUNTIME` to that directory in the environment of every
-   `gatedtrain` process that runs `smoke` or `train` (the default is the package's own `runtime/`). The adapter reads
-   the variable and `<runtime>/.venv/pyvenv.cfg` when it is imported, so the venv must exist before that process
+   directory of yours, **and** set `runtime_dir` in the `[packs.text-gsm8k]` table of your host file
+   (`~/.config/gatedtrain/host.toml`) to that directory (the default is the package's own `runtime/`). The adapter reads
+   the host file and `<runtime>/.venv/pyvenv.cfg` when it is imported, so the venv must exist before that process
    starts, and the directory must equal the pipeline params `smoke.runtime_dir` and `train.runtime_dir`. `smoke` and
    `train` refuse in their plan, before any GPU job, when the directory differs, when `<runtime>/.venv/bin/python` is
    missing, or when `<runtime>/uv.lock` is not the pack's `runtime/uv.lock`. Build **without bytecode**:
@@ -188,8 +188,14 @@ Everything in this section runs as the owner. The paths are examples; `/srv/gate
    cd /srv/gatedtrain/runtime-gsm8k
    env -u UV_COMPILE_BYTECODE UV_PROJECT_ENVIRONMENT=$PWD/.venv UV_LINK_MODE=copy UV_PYTHON_DOWNLOADS=never \
        uv sync --frozen --python /srv/gatedtrain/python/cpython-3.12.16-linux-x86_64-gnu/bin/python3.12
-   export GATEDTRAIN_PACK_TEXT_GSM8K_RUNTIME=/srv/gatedtrain/runtime-gsm8k   # in every shell that runs gatedtrain
    ```
+   and in `~/.config/gatedtrain/host.toml`:
+   ```toml
+   [packs.text-gsm8k]
+   runtime_dir = "/srv/gatedtrain/runtime-gsm8k"
+   ```
+   (The variable `GATEDTRAIN_PACK_TEXT_GSM8K_RUNTIME` still works as a deprecated workaround and prints a notice; it
+   is removed with gatedtrain 0.9.0.)
 
    Do not add `--compile-bytecode`: the job's key fingerprints every entry of the read-only runtime mount and refuses
    more than 100,000 entries (`gatedtrain.ainative.backend.MAX_INPUT_ENTRIES`), and a venv with compiled bytecode
@@ -256,9 +262,10 @@ The script builds `/opt/gatedtrain-keeper/eval-venv` from that interpreter, whic
 `/opt/gatedtrain-keeper/python`: root installs a standalone CPython there before running the script, with
 `env UV_PYTHON_INSTALL_DIR=/opt/gatedtrain-keeper/python uv python install 3.12` (the script checks that the tree is
 root-owned and not group- or other-writable, and does not install it itself). The keeper serves the eval venv
-read-only to its containers. The generator's interpreter is `/opt/gatedtrain-keeper/eval-venv/bin/python`; set
-`GATEDTRAIN_PACK_TEXT_GSM8K_EVAL_PYTHON` to another absolute path in the keeper's own environment when the eval venv
-lives elsewhere. The keeper still runs it only when that interpreter is a regular file inside one of its `--eval-tree`
+read-only to its containers. The generator's interpreter is `bin/python` of the eval venv `gatedtrain setup host` builds; start the keeper with
+`--eval-python PATH` when the eval venv lives elsewhere (the value is part of the keeper's signed environment record).
+The variable `GATEDTRAIN_PACK_TEXT_GSM8K_EVAL_PYTHON` still works as a deprecated workaround, prints a notice, and is
+removed in pack 0.4.0. The keeper still runs it only when that interpreter is a regular file inside one of its `--eval-tree`
 directories.
 
 ## The pipeline params
@@ -271,10 +278,17 @@ the copy to `gatedtrain project create --pipeline <copy> --keeper <socket>`:
 | `choose_task_and_base.base_model_dir` | the Qwen3-0.6B directory fetched above, e.g. `/srv/gatedtrain/models/Qwen3-0.6B` |
 | `choose_task_and_base.decoding` | optional: `greedy` (the default) or `sampled` |
 | `smoke.image`, `train.image` | the CUDA devel image pinned by digest, held by the owner's rootless daemon |
-| `smoke.runtime_dir`, `train.runtime_dir` | the runtime directory holding the owner-built `.venv`, e.g. `/srv/gatedtrain/runtime-gsm8k`; the value of `GATEDTRAIN_PACK_TEXT_GSM8K_RUNTIME` |
+| `smoke.runtime_dir`, `train.runtime_dir` | the runtime directory holding the owner-built `.venv`, e.g. `/srv/gatedtrain/runtime-gsm8k`; the host file's `[packs.text-gsm8k] runtime_dir` |
 | `smoke.python_dir`, `train.python_dir` | the directory of uv-managed interpreters the venv was made from, e.g. `/srv/gatedtrain/python` |
 
-`smoke` and `train` take the same three values. `write_recipe.profile_steps` is optional (the recipe's value is the only
+`smoke` and `train` take the same three values. Two optional params describe the owner's GPU:
+
+| Param | Value |
+|---|---|
+| `smoke.cuda_arch`, `train.cuda_arch` | the GPU's compute capability, such as `8.9` (`nvidia-smi --query-gpu=compute_cap`); it becomes `TORCH_CUDA_ARCH_LIST` in the job. Without it the job sets none and the toolchain reads the GPU. |
+| `smoke.memory_limit_gb` | optional: a smoke bound **lower** than the owner's, in GB (10^9 bytes). The owner's bound is the host file's `gpu_mem_limit_gb` (default 22.5, a 24 GB card's); a pipeline value above it is refused, never applied, so an agent-written pipeline cannot raise the bound. The smoke record keeps the bound used and the owner's, and `check` and `train` refuse a record whose bound the host no longer allows. |
+
+`write_recipe.profile_steps` is optional (the recipe's value is the only
 one accepted).
 
 ## Running a project
@@ -316,6 +330,41 @@ rootful-access check does not cover sudo, and `rootless = true` in the host file
   sealed set is measured by `gsm8k_answer`, not by the training reward.
 - The runtime venv must be built without bytecode and kept under 100,000 entries.
 - A prototype: the models it trains are not promotable.
+
+## Settings that depend on the GPU
+
+The batch generator (`generate_vllm.py`) runs in the keeper's container with `max_model_len=2048`,
+`gpu_memory_utilization=0.85`, bfloat16 and, for greedy decoding, `max_num_seqs=1` with prefix caching off. The training
+script (`train_grpo.py`) uses a vLLM memory share of 0.30 and a micro-batch of 8. They were chosen and probed on one
+24 GB GPU and are part of the pack's code (the generator's hash is registered); they are not settings. `max_num_seqs=1` is
+what makes greedy decoding deterministic and must stay.
+
+**Re-probe on another GPU.** On a different GPU, or a different vLLM or driver, run the smoke stage and the greedy
+determinism probe described under "Decoding" again before trusting the numbers: the peak memory against your bound, the
+time of one arm against the generator's time limit, and the items that differ between the two seeds (it must be 0).
+Raise `gpu_mem_limit_gb` in your host file only after measuring. The host file is written by you; a process
+running as your own OS user (an agent with your shell) can edit it like any other file of yours, so the bound is recorded
+and re-checked, not sealed.
+
+## Changes
+
+### 0.3.1 (Unreleased)
+
+Needs gatedtrain 0.7.1 (`gatedtrain>=0.7.1,<0.8`): it uses the host file's `[packs]` tables, `owner_gpu_mem_limit_gb` and the
+keeper's `--eval-python`.
+
+
+- **GPU facts are the owner's params.** `TORCH_CUDA_ARCH_LIST` is no longer fixed at `8.9` in the job: set `cuda_arch` on
+  `smoke` and `train` (without it the job exports none and the toolchain reads the GPU). A pipeline copy that relied on
+  the old behaviour on an 8.9 GPU adds `cuda_arch: "8.9"`. The smoke memory bound is the owner's (the host file's
+  `gpu_mem_limit_gb`, default 22.5 GB, unchanged); the `memory_limit_gb` param of `smoke` can only lower it, a higher value is
+  refused; the smoke record keeps both bounds. The runtime directory is the host file's `[packs.text-gsm8k] runtime_dir`
+  and the eval interpreter the keeper's `--eval-python`; the two variables are deprecated workarounds (removed with
+  gatedtrain 0.9.0 and pack 0.4.0). These need gatedtrain 0.7.1, which adds them.
+- Values the pack shared with gatedtrain are imported from it (the generator's time limit, the eval venv's location, the
+  memory bound); the GPU-hour estimates, the trl version (read from `runtime/uv.lock`) and the interpreter version in the
+  build advice are each written once, and `tests/test_single_source.py` checks the copies that must stay in
+  `train_grpo.py`.
 
 ## License
 

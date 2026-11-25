@@ -14,8 +14,16 @@
 #   smoke.python_dir, train.python_dir   the directory of uv-managed interpreters the venv was made from, e.g.
 #                                        /srv/gatedtrain/python
 #
-# smoke and train take the same three values. The step names are the usual ones, so the artifacts keep their names;
-# the stage types carry the pack's `gsm8k_` prefix.
+# smoke and train take the same three values. Optional params: `cuda_arch` on both and `memory_limit_gb` on smoke only
+# (`params: {..., cuda_arch: "8.9"}`); left out, the job exports no TORCH_CUDA_ARCH_LIST (the toolchain reads the GPU):
+#
+#   smoke.cuda_arch, train.cuda_arch      the GPU's compute capability, such as 8.9 (`nvidia-smi --query-gpu=compute_cap`)
+#   smoke.memory_limit_gb                 a smoke bound LOWER than the owner's, in GB (10^9 bytes). The owner's bound is
+#                                         the host file's `gpu_mem_limit_gb` (default 22.5); a higher value is refused.
+#                                         Recorded in the smoke record
+#
+# The step names are the usual ones, so the artifacts keep their names; the stage types carry the pack's `gsm8k_`
+# prefix.
 name: text-gsm8k
 stages:
   - {name: intake_seal, stage: intake_seal}

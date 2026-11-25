@@ -123,7 +123,7 @@ class EvalRequirementsTest(unittest.TestCase):
 
     def test_pack_dependencies_unchanged(self):
         self.assertEqual(tomllib.loads((REPO / "pyproject.toml").read_text())["project"]["dependencies"],
-                         ["gatedtrain>=0.7,<0.8"])
+                         ["gatedtrain>=0.7.1,<0.8"])
 
     def test_pack_version_is_one_value(self):
         """`__version__` and the project version are the same release (the README and the tag name it)."""
@@ -153,15 +153,15 @@ class ReadmeTest(unittest.TestCase):
         """The README names the gatedtrain release the pack needs and the two keeper modes, so a result is described
         with the mode that produced it (engineering rule 7)."""
         flat = " ".join(self.text.split())
-        self.assertIn("`gatedtrain>=0.7,<0.8`", flat)
+        self.assertIn("`gatedtrain>=0.7.1,<0.8`", flat)
         for needle in ("Changes in 0.3.0", "same-user", "separate-user", "docs/sudo-free-quickstart.md"):
             self.assertIn(needle, flat)
 
     def test_readme_runtime_and_keeper_install(self):
-        """The runtime variable is required (and equals runtime_dir) for a runtime of the owner's; the keeper's own
+        """The host file's runtime_dir is required (and equals the pipeline's) for a runtime of the owner's; the keeper's own
         environment needs the pack; the eval CPython is installed by root under /opt/gatedtrain-keeper/python."""
         flat = " ".join(self.text.split())
-        for needle in ("export GATEDTRAIN_PACK_TEXT_GSM8K_RUNTIME=/srv/gatedtrain/runtime-gsm8k",
+        for needle in ("[packs.text-gsm8k] runtime_dir = \"/srv/gatedtrain/runtime-gsm8k\"",
                        "must equal the pipeline params `smoke.runtime_dir` and `train.runtime_dir`",
                        "the keeper's own environment", "the same version as the owner's",
                        "env UV_PYTHON_INSTALL_DIR=/opt/gatedtrain-keeper/python uv python install 3.12",
