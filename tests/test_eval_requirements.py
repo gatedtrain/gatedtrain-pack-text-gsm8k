@@ -123,7 +123,12 @@ class EvalRequirementsTest(unittest.TestCase):
 
     def test_pack_dependencies_unchanged(self):
         self.assertEqual(tomllib.loads((REPO / "pyproject.toml").read_text())["project"]["dependencies"],
-                         ["gatedtrain>=0.6,<0.7"])
+                         ["gatedtrain>=0.7,<0.8"])
+
+    def test_pack_version_is_one_value(self):
+        """`__version__` and the project version are the same release (the README and the tag name it)."""
+        import gatedtrain_pack_text_gsm8k as pack
+        self.assertEqual(pack.__version__, tomllib.loads((REPO / "pyproject.toml").read_text())["project"]["version"])
 
 
 class ReadmeTest(unittest.TestCase):
@@ -143,6 +148,14 @@ class ReadmeTest(unittest.TestCase):
                     self.assertIn(param, self.text)
         for env in ("GATEDTRAIN_PACK_TEXT_GSM8K_RUNTIME", "GATEDTRAIN_PACK_TEXT_GSM8K_EVAL_PYTHON"):
             self.assertIn(env, self.text)
+
+    def test_readme_states_the_gatedtrain_release_and_keeper_modes(self):
+        """The README names the gatedtrain release the pack needs and the two keeper modes, so a result is described
+        with the mode that produced it (engineering rule 7)."""
+        flat = " ".join(self.text.split())
+        self.assertIn("`gatedtrain>=0.7,<0.8`", flat)
+        for needle in ("Changes in 0.3.0", "same-user", "separate-user", "docs/sudo-free-quickstart.md"):
+            self.assertIn(needle, flat)
 
     def test_readme_runtime_and_keeper_install(self):
         """The runtime variable is required (and equals runtime_dir) for a runtime of the owner's; the keeper's own

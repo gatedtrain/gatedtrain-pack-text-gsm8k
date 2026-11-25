@@ -1,6 +1,6 @@
 # gatedtrain-pack-text-gsm8k
 
-A scenario pack for [gatedtrain](https://github.com/gatedtrain/gatedtrain) (`gatedtrain>=0.6,<0.7`): it teaches a small
+A scenario pack for [gatedtrain](https://github.com/gatedtrain/gatedtrain) (`gatedtrain>=0.7,<0.8`): it teaches a small
 language model grade-school math and lets gatedtrain decide, by a rule fixed before training, whether the trained
 model really is better.
 
@@ -13,8 +13,9 @@ It is a prototype: the models it trains are not promotable.
 
 ## How it works
 
-The owner (you) prepares data and trains; the keeper, a service under its own OS user, holds the sealed questions and
-runs the evaluation. The boxes below name the stages of the pack's pipeline.
+The owner (you) prepares data and trains; the keeper, a service of gatedtrain, holds the sealed questions and runs the
+evaluation. Whether the keeper's own OS user keeps the sealed questions from your account depends on the keeper mode
+(see "Keeper modes"). The boxes below name the stages of the pack's pipeline.
 
 ```mermaid
 flowchart LR
@@ -42,6 +43,20 @@ flowchart LR
 ```
 
 The container gets the sealed questions, never their labels; the keeper scores the answers itself.
+
+## Changes in 0.3.0
+
+- Needs gatedtrain 0.7 (`gatedtrain>=0.7,<0.8`). The pack's code needed no change for it: its CPU tests (123) pass
+  unchanged against 0.6.0 and against the 0.7.0 candidate; only the dependency range, the version and the documentation
+  moved.
+- **Keeper modes.** gatedtrain 0.7 sets up a same-user keeper by default (no sudo) and states the mode in every result.
+  See "Keeper modes" below; a result of this pack is quoted with the mode line of its report.
+- The pack uses no gatedtrain image: its trainer image is the recipe's CUDA devel image pinned by digest in the
+  pipeline params, so the image lock of gatedtrain 0.7 (`gatedtrain image list`) does not concern it.
+- Known limits of this release: no GPU end to end run was made with gatedtrain 0.7 (the CPU tests use fake containers);
+  the keeper's eval tree still comes from `gatedtrain setup host`, a script for root, in both keeper modes (a user-owned
+  eval tree for a same-user keeper has not been tried); the pack's own paths (`/opt/gatedtrain-keeper/...` for the eval
+  interpreter, `GATEDTRAIN_PACK_TEXT_GSM8K_EVAL_PYTHON`) are unchanged.
 
 ## Changes in 0.2.0
 
@@ -86,9 +101,22 @@ About 0.64 GPU hours in all (training 0.51 h). Your numbers will differ with oth
 ## What you need
 
 - Linux x86_64, one NVIDIA GPU, a CUDA 13.0 driver; CPython 3.12 for both venvs.
-- gatedtrain 0.6 with a keeper and rootless Docker for the owner and the keeper (see gatedtrain's
-  [AI-native projects](https://github.com/gatedtrain/gatedtrain/blob/main/docs/ai-native.md) guide).
-- Root, once, to install the pack in the keeper's environment and to build the keeper's eval tree.
+- gatedtrain 0.7 with a keeper and rootless Docker for the owner and the keeper (see gatedtrain's
+  [Quickstart without sudo](https://github.com/gatedtrain/gatedtrain/blob/main/docs/sudo-free-quickstart.md) and
+  [AI-native projects](https://github.com/gatedtrain/gatedtrain/blob/main/docs/ai-native.md) guides; `gatedtrain setup
+  check` lists what the host must provide).
+- Root, once, to build the keeper's eval tree (`gatedtrain setup host`), and in a separate-user keeper also to install
+  the pack in the keeper's environment. A same-user keeper needs no sudo for the pack itself.
+
+## Keeper modes
+
+gatedtrain 0.7 has two keeper modes and every result states the one that produced it. **Same-user** (the default of
+`gatedtrain setup keeper`): the keeper runs under your own OS user and follows the procedure, but anything running as
+you, such as an agent with a shell, can read the sealed questions, the labels and the keeper's key; the report says the
+data was not protected from your account. **Separate-user** (`gatedtrain setup keeper --mode separate-user`, one sudo):
+the keeper runs under its own OS user and the sealed questions are out of your account's reach. This pack works in both.
+Quote the mode line of the report when you quote a result, and use `--require-keeper-mode separate-user` at `project
+create` when a weaker keeper must be refused. The run described below was made before gatedtrain 0.7 existed and does not state a keeper mode.
 
 ## Install
 
@@ -96,7 +124,7 @@ The pack is not on PyPI. Install it from this repository at a release tag, into 
 run, as the owner:
 
 ```sh
-pip install "gatedtrain-pack-text-gsm8k @ git+https://github.com/gatedtrain/gatedtrain-pack-text-gsm8k@v0.2.0"
+pip install "gatedtrain-pack-text-gsm8k @ git+https://github.com/gatedtrain/gatedtrain-pack-text-gsm8k@v0.3.0"
 ```
 
 The keeper's own environment needs the same pack at the same version (see "The keeper's environment" below).
@@ -121,7 +149,7 @@ script and its runtime lock). It has no per-item generator: a project needs a ke
 
 1. [Prepare the host](#preparing-the-host-the-owner-no-sudo) as the owner: the base model, the training runtime, the
    data and the image.
-2. Install the pack in [the keeper's environment](#the-keepers-environment) (root).
+2. Install the pack in [the keeper's environment](#the-keepers-environment) (root in a separate-user keeper).
 3. Build [the keeper's eval tree](#the-keepers-eval-tree) (root).
 4. Fill in [the pipeline params](#the-pipeline-params) and [run the project](#running-a-project).
 
@@ -193,15 +221,17 @@ Rules: TXT-2 (the base model files), TXT-4 (the runtime directory and the 100,00
 
 The keeper checks, before it starts a generator, that the generator's script is a file of a distribution in the
 keeper's own environment record (gatedtrain, the scenario packs and their dependencies), so the pack must be installed
-in the keeper's own environment, the root-owned venv `gatedtrain setup keeper` installs (`/opt/gatedtrain-keeper/venv`
-by default), at the same version as the owner's. `gatedtrain setup keeper` prints that install line with the packs
+in the keeper's own environment at the same version as the owner's. In the default same-user mode the keeper runs from
+the environment you run `gatedtrain` from, so the install above is enough (restart the keeper afterwards). In
+separate-user mode it is the root-owned venv `gatedtrain setup keeper --mode separate-user` installs
+(`/opt/gatedtrain-keeper/venv` by default). `gatedtrain setup keeper` prints that install line with the packs
 installed for the owner at their versions (`--packages gatedtrain-pack-text-gsm8k==<version>` names it); the printed
-`pip install ... gatedtrain-pack-text-gsm8k==<version>` resolves only from PyPI, where the pack is not published. Root
-installs it from this repository at the same tag as the owner's instead:
+`pip install ... gatedtrain-pack-text-gsm8k==<version>` resolves only from PyPI, where the pack is not published. In
+separate-user mode root installs it from this repository at the same tag as the owner's instead:
 
 ```sh
 sudo /opt/gatedtrain-keeper/venv/bin/pip install --no-cache-dir \
-    "gatedtrain-pack-text-gsm8k @ git+https://github.com/gatedtrain/gatedtrain-pack-text-gsm8k@v0.2.0"
+    "gatedtrain-pack-text-gsm8k @ git+https://github.com/gatedtrain/gatedtrain-pack-text-gsm8k@v0.3.0"
 ```
 
 Restart the keeper after installing or upgrading the pack.
@@ -259,7 +289,9 @@ container.
 ## What the keeper checks and what is cooperative
 
 This section follows gatedtrain's
-[AI-native projects](https://github.com/gatedtrain/gatedtrain/blob/main/docs/ai-native.md) guide.
+[AI-native projects](https://github.com/gatedtrain/gatedtrain/blob/main/docs/ai-native.md) guide. What the keeper
+guarantees about the sealed data depends on its mode ("Keeper modes"): in same-user mode these checks show that the
+procedure was followed, not that the data stayed unseen.
 
 The keeper checks, from its own signed records: the models it evaluates (it copies the files a model reference lists
 into its own state and checks their hashes), the sealed set and its labels (the container gets the sealed inputs, never
