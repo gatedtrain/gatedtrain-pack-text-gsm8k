@@ -74,6 +74,9 @@ class _Layout(unittest.TestCase):
             self.addCleanup(p.stop)
         self.tmp = Path(os.path.realpath(tempfile.mkdtemp(prefix="tmp-job-", dir=Path(__file__).resolve().parent)))
         self.addCleanup(shutil.rmtree, self.tmp, True)
+        p = mock.patch.dict(os.environ, {"GATEDTRAIN_HOST_CONFIG": str(self.tmp / "no-host.toml")})   # hermetic
+        p.start()
+        self.addCleanup(p.stop)
         self.work, self.out_root = self.tmp / "work", self.tmp / "out"
         self.runtime, self.python, self.hub = self.tmp / "runtime", self.tmp / "python", self.tmp / "hub"
         for d in (self.work, self.out_root, self.runtime / ".venv" / "bin", self.python / TREE / "bin", self.hub):
@@ -182,11 +185,12 @@ class StageShapeTests(unittest.TestCase):
         self.assertEqual(WriteRecipe.params, frozenset({"profile_steps"}))
         for cls in (Smoke, Train):
             self.assertEqual(cls.needs, frozenset({"gpu"}))
-            self.assertEqual(cls.params, frozenset({"image", "runtime_dir", "python_dir"}))
+            self.assertEqual(cls.params, frozenset({"image", "runtime_dir", "python_dir", "cuda_arch"}
+                                                   | ({"memory_limit_gb"} if cls is Smoke else set())))
         self.assertIs(Train.trains, True)
         self.assertIs(Smoke.trains, False)
         self.assertEqual(Train.outputs, {"model": SCHEMA_MODEL_REF})
-        self.assertEqual(stages.MEMORY_LIMIT_GB, 22.5)
+        self.assertEqual(stages.MEMORY_LIMIT_GB, 22.5)       # gatedtrain's default (ext.smoke.GPU_MEM_LIMIT_GB)
 
 
 class BaseTests(_Layout):
@@ -424,11 +428,140 @@ class SmokeTests(_Layout):
             self.smoke(inputs)
         self.assertRule(cm, "MM-38", "23.1", "22.5")
 
+    def owner_file(self, text: str):
+        """Point the host file at a temporary TOML for this test (the owner's `gpu_mem_limit_gb`)."""
+        path = self.tmp / "host.toml"
+        path.write_text(text, encoding="utf-8")
+        p = mock.patch.dict(os.environ, {"GATEDTRAIN_HOST_CONFIG": str(path)})
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_smoke_memory_bound_is_the_owners(self):
+        """The host file's `gpu_mem_limit_gb` is the bound; the record names it."""
+        self.owner_file("gpu_mem_limit_gb = 31.5\n")
+        inputs = self.upto_recipe()
+        self.peak_gb = 25.0
+        ctx, out = self.smoke(inputs)
+        rec = self.proj.read_artifact(out["smoke"])
+        self.assertEqual((rec["verdict"], rec["memory_limit_gb"], rec["owner_memory_limit_gb"]), ("PASS", 31.5, 31.5))
+        self.assertEqual(Smoke().check(ctx, out), [])
+
+    def test_the_pipeline_may_only_lower_the_bound(self):
+        self.owner_file("gpu_mem_limit_gb = 31.5\n")
+        inputs = self.upto_recipe()
+        self.peak_gb = 23.1
+        self.params = {**self.params, "memory_limit_gb": 19.0}
+        with self.assertRaises(Refused) as cm:
+            self.smoke(inputs)
+        self.assertRule(cm, "MM-38", "23.1", "19")
+        self.params = {**self.params, "memory_limit_gb": 40.0}           # above the owner's: refused, not applied
+        for ctx in (self.ctx("smoke", inputs, self.params, gpu=True, planning=True),
+                    self.ctx("smoke", inputs, self.params, gpu=True)):
+            with self.assertRaises(Refused) as cm:
+                Smoke().plan(ctx)
+            self.assertRule(cm, "TXT-4", "memory_limit_gb", "31.5", "gpu_mem_limit_gb")
+        self.params = {**self.params, "memory_limit_gb": 31.5}           # equal is allowed
+        self.smoke(inputs)
+
+    def test_without_a_host_file_the_default_is_the_ceiling(self):
+        """No `gpu_mem_limit_gb`: gatedtrain's default bound, and a pipeline cannot raise it."""
+        inputs = self.upto_recipe()
+        self.params = {**self.params, "memory_limit_gb": 23.5}
+        with self.assertRaises(Refused) as cm:
+            self.smoke(inputs)
+        self.assertRule(cm, "TXT-4", "22.5")
+        self.params = {**self.params, "memory_limit_gb": 20.0}
+        ctx, out = self.smoke(inputs)
+        self.assertEqual(self.proj.read_artifact(out["smoke"])["memory_limit_gb"], 20.0)
+
+    def test_a_malformed_host_file_is_refused_not_ignored(self):
+        self.owner_file("gpu_mem_limit_gb = 0\n")
+        inputs = self.upto_recipe()
+        with self.assertRaises(Refused) as cm:
+            Smoke().plan(self.ctx("smoke", inputs, self.params, gpu=True, planning=True))
+        self.assertIn("gpu_mem_limit_gb", str(cm.exception))
+
+    def test_train_refuses_a_smoke_judged_under_a_bound_the_owner_no_longer_allows(self):
+        self.owner_file("gpu_mem_limit_gb = 31.5\n")
+        inputs = self.upto_recipe()
+        self.peak_gb = 25.0
+        _, out = self.smoke(inputs)
+        self.owner_file("gpu_mem_limit_gb = 24.0\n")                     # lowered between smoke and train
+        with self.assertRaises(Refused) as cm:
+            self.train(inputs, out["smoke"])
+        self.assertRule(cm, "MM-38", "no longer allows")
+        self.owner_file("gpu_mem_limit_gb = 31.5\n")
+        self.train(inputs, out["smoke"])                                  # restored: the same record is accepted
+
+    def test_a_huge_integer_bound_is_refused_not_a_crash(self):
+        inputs = self.upto_recipe()
+        ctx = self.ctx("smoke", inputs, {**self.params, "memory_limit_gb": 10 ** 400}, gpu=True, planning=True)
+        with self.assertRaises(Refused) as cm:
+            Smoke().plan(ctx)
+        self.assertRule(cm, "TXT-4", "memory_limit_gb")
+
+    def test_check_refuses_a_bound_above_the_owners_now(self):
+        self.owner_file("gpu_mem_limit_gb = 31.5\n")
+        inputs = self.upto_recipe()
+        self.peak_gb = 25.0
+        ctx, out = self.smoke(inputs)
+        self.owner_file("gpu_mem_limit_gb = 24.0\n")                     # the owner lowered it since
+        self.assertEqual([p.field for p in Smoke().check(ctx, out)], ["smoke.verdict"])
+
+    def test_smoke_check_uses_the_recorded_bound(self):
+        inputs = self.upto_recipe()
+        self.owner_file("gpu_mem_limit_gb = 31.5\n")
+        self.peak_gb = 23.1
+        self.params = {**self.params, "memory_limit_gb": 23.5}
+        ctx, out = self.smoke(inputs)
+        rec = self.proj.read_artifact(out["smoke"])
+        lowered = self.proj.write_artifact("smoke", "smoke", {**rec, "memory_limit_gb": 20.0}, stages.SCHEMA_SMOKE)
+        self.assertEqual([p.field for p in Smoke().check(ctx, {"smoke": lowered})], ["smoke.verdict"])
+
+    def test_smoke_check_refuses_a_tampered_bound(self):
+        inputs = self.upto_recipe()
+        ctx, out = self.smoke(inputs)
+        rec = self.proj.read_artifact(out["smoke"])
+        for bad in (-1, 0, True, "22", None):          # NaN and inf cannot be written to a record
+            with self.subTest(bad=bad):
+                forged = self.proj.write_artifact("smoke", "smoke", {**rec, "memory_limit_gb": bad}, stages.SCHEMA_SMOKE)
+                self.assertEqual([p.field for p in Smoke().check(ctx, {"smoke": forged})], ["smoke.verdict"])
+
+    def test_bad_memory_bound_refused(self):
+        inputs = self.upto_recipe()
+        for bad in (0, -1, True, "22", float("nan"), float("inf")):
+            with self.subTest(bad=bad):
+                ctx = self.ctx("smoke", inputs, {**self.params, "memory_limit_gb": bad}, gpu=True, planning=True)
+                with self.assertRaises(Refused) as cm:
+                    Smoke().plan(ctx)
+                self.assertRule(cm, "TXT-4", "memory_limit_gb")
+
+    def test_cuda_arch_is_the_owners_param(self):
+        inputs = self.upto_recipe()
+        self.smoke(inputs)
+        [jid] = self.job_ids()
+        rec = json.loads((self.proj.root / "jobs" / jid / "job.json").read_text())
+        self.assertNotIn("TORCH_CUDA_ARCH_LIST", rec["job"]["env"])       # the record keeps names only
+        self.params = {**self.params, "cuda_arch": "9.0"}
+        self.smoke(inputs)
+        [other] = [j for j in self.job_ids() if j != jid]
+        rec = json.loads((self.proj.root / "jobs" / other / "job.json").read_text())
+        self.assertIn("TORCH_CUDA_ARCH_LIST", rec["job"]["env"])         # its value: test_job
+
+    def test_bad_cuda_arch_refused(self):
+        inputs = self.upto_recipe()
+        for bad in ("89", "8.9;", "", "8.9\n", 8.9):
+            with self.subTest(bad=bad):
+                ctx = self.ctx("smoke", inputs, {**self.params, "cuda_arch": bad}, gpu=True, planning=True)
+                with self.assertRaises(Refused) as cm:
+                    Smoke().plan(ctx)
+                self.assertRule(cm, "TXT-4", "cuda_arch")
+
     def test_smoke_plan_has_no_side_effects(self):
         inputs = self.upto_recipe()
         before = sorted(p.name for p in next(self.out_root.iterdir()).iterdir())
         passed = self.proj.write_artifact("smoke", "smoke", {
-            "schema": stages.SCHEMA_SMOKE, "schema_version": 1, "verdict": "PASS", "reasons": [],
+            "schema": stages.SCHEMA_SMOKE, "schema_version": 1, "verdict": "PASS", "reasons": [], "memory_limit_gb": 22.5,
             **{f"{k}_sha256": inputs[k].sha256 for k in ("base", "train_set", "recipe")}}, stages.SCHEMA_SMOKE)
         for cls, ref, extra in ((Smoke, "smoke", {}), (Train, "train", {"smoke": passed})):
             ctx = self.ctx(ref, {**inputs, **extra}, self.params, gpu=True, planning=True)
@@ -450,7 +583,7 @@ class SmokeTests(_Layout):
     def plan_and_run_refusals(self, inputs, params):
         """The refusal of Smoke's and Train's plan and of Smoke's run under `params`; no job is submitted."""
         passed = self.proj.write_artifact("smoke", "smoke", {
-            "schema": stages.SCHEMA_SMOKE, "schema_version": 1, "verdict": "PASS", "reasons": [],
+            "schema": stages.SCHEMA_SMOKE, "schema_version": 1, "verdict": "PASS", "reasons": [], "memory_limit_gb": 22.5,
             **{f"{k}_sha256": inputs[k].sha256 for k in ("base", "train_set", "recipe")}}, stages.SCHEMA_SMOKE)
         got = []
         for cls, ref, extra in ((Smoke, "smoke", {}), (Train, "train", {"smoke": passed})):
@@ -477,7 +610,7 @@ class SmokeTests(_Layout):
         self.assertEqual(plan_smoke, plan_train)
         self.assertEqual(plan_smoke, run)
         self.assertEqual([p.rule for p in run], ["TXT-4"])
-        self.assertIn(adapter.RUNTIME_ENV, str(run))
+        self.assertIn("[packs.text-gsm8k]", str(run))
         self.assertIn(str(other), str(run))
 
     def test_plan_refuses_a_runtime_without_venv_python(self):

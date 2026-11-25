@@ -29,10 +29,14 @@ NAME = "text-gsm8k-grpo"
 TRAINER_ID = "rl.trl_grpo@0.1"
 EVALUATOR_ID = "gsm8k.gsm8k_answer@0.1"
 FRAMEWORK_PACKAGE = "trl"
+PACK = "text-gsm8k"                  # the name of this pack's `[packs.<name>]` table in the owner's host file
+# The runtime directory: the host file's `[packs.text-gsm8k] runtime_dir`, else this package's `runtime/`. The variable
+# below is a deprecated workaround (it prints a notice naming the file key) that goes away with gatedtrain 0.9.0.
 RUNTIME_ENV = "GATEDTRAIN_PACK_TEXT_GSM8K_RUNTIME"
-RUNTIME = runtime_dir(RUNTIME_ENV, __file__, parents=0)
+RUNTIME = runtime_dir(RUNTIME_ENV, __file__, parents=0, pack=PACK)
 HOST_ROWS = venv_runtime_rows(RUNTIME, NAME)
 OUTPUT_ROOT = "{output_root}"
+GPU_H_ESTIMATE = {"smoke": 0.25, "full": 1.5}      # GPU-hours per profile: the registry row and the jobs use these
 
 # The recipe's 18 environment names (its runtime/README.md "Environment variable names"); none is a credential.
 ENV_NAMES = ("DO_NOT_TRACK", "FLASHINFER_WORKSPACE_BASE", "HF_HOME", "HF_HUB_OFFLINE", "HOME", "MASTER_ADDR",
@@ -49,7 +53,7 @@ TRAINER_ROWS: dict[str, dict[str, Any]] = {NAME: {
     "outputs": ("checkpoint-<step>/ HF directories", "trainer_state.json", "samples.jsonl", "memory.jsonl"),
     "components": HF_LLM_COMPONENTS,
     "consumption": {"target": "stage", "fallback": None},
-    "gpu_h_estimate": 1.5,                           # the full profile (job.PROFILES)
+    "gpu_h_estimate": GPU_H_ESTIMATE["full"],           # the full profile (job.PROFILES)
     "evaluators": (EVALUATOR_ID,),
     "framework": FRAMEWORK_PACKAGE,
     # EXT-79: the interpreter install directory and the runtime directory (rowkit host rows), and the whole output

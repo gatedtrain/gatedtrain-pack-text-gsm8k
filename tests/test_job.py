@@ -25,7 +25,7 @@ TREE = "cpython-3.12.16-linux-x86_64-gnu"
 RECIPE_ENV = {
     "DO_NOT_TRACK": "1", "FLASHINFER_WORKSPACE_BASE": "/tmp/cache", "HF_HOME": "/tmp/hf", "HF_HUB_OFFLINE": "1",
     "HOME": "/tmp/home", "MASTER_ADDR": "127.0.0.1", "PYTHONDONTWRITEBYTECODE": "1", "PYTHONUNBUFFERED": "1",
-    "TOKENIZERS_PARALLELISM": "false", "TORCHINDUCTOR_CACHE_DIR": "/tmp/cache/inductor", "TORCH_CUDA_ARCH_LIST": "8.9",
+    "TOKENIZERS_PARALLELISM": "false", "TORCHINDUCTOR_CACHE_DIR": "/tmp/cache/inductor",
     "TRANSFORMERS_OFFLINE": "1", "TRITON_CACHE_DIR": "/tmp/cache/triton", "VLLM_CACHE_ROOT": "/tmp/cache/vllm",
     "VLLM_CONFIG_ROOT": "/tmp/cache/vllm-config", "VLLM_NO_USAGE_STATS": "1", "VLLM_USE_FLASHINFER_SAMPLER": "0",
     "XDG_CACHE_HOME": "/tmp/cache",
@@ -133,19 +133,19 @@ class JobTests(_Layout):
         (other / ".venv" / "bin").mkdir(parents=True)
         with self.assertRaises(Refused) as cm:
             self.job(runtime_dir=other)
-        self.assertRefusedTxt4(cm, str(other), adapter.RUNTIME_ENV)
+        self.assertRefusedTxt4(cm, str(other), "[packs.text-gsm8k]")
 
     def test_runtime_without_venv_refused(self):
         shutil.rmtree(self.runtime / ".venv")
         with self.assertRaises(Refused) as cm:
             self.job()
-        self.assertRefusedTxt4(cm, adapter.RUNTIME_ENV, "uv sync")
+        self.assertRefusedTxt4(cm, "[packs.text-gsm8k]", "uv sync")
 
     def test_runtime_without_venv_python_refused(self):
         (self.runtime / ".venv" / "bin" / "python").unlink()
         with self.assertRaises(Refused) as cm:
             self.job()
-        self.assertRefusedTxt4(cm, ".venv/bin/python", adapter.RUNTIME_ENV, "uv sync")
+        self.assertRefusedTxt4(cm, ".venv/bin/python", "[packs.text-gsm8k]", "uv sync")
 
     def test_runtime_without_lock_refused(self):
         (self.runtime / "uv.lock").unlink()
@@ -179,7 +179,7 @@ class JobTests(_Layout):
         with self.assertRaises(Refused) as cm:
             job.train_job(profile="smoke", image=IMAGE, python_dir=self.python, inputs_dir=self.inputs,
                           base_dir=self.base, seed=42)
-        self.assertRefusedTxt4(cm, adapter.RUNTIME_ENV, "uv sync")
+        self.assertRefusedTxt4(cm, "[packs.text-gsm8k]", "uv sync")
 
     def test_job_fields(self):
         j = job.train_job(profile="smoke", image=IMAGE, runtime_dir=self.runtime, python_dir=self.python,
@@ -197,7 +197,13 @@ class JobTests(_Layout):
             Mount(str(self.inputs / "prompt.txt"), "/inputs/prompt.txt", True),
             Mount(str(self.inputs / "train_grpo.py"), "/inputs/train_grpo.py", True),
             Mount(str(self.base), "/inputs/base-model", True)))
-        self.assertEqual(dict(j.env), RECIPE_ENV)
+        self.assertEqual(dict(j.env), RECIPE_ENV)           # no GPU architecture: it is the owner's (`cuda_arch`)
+        j = job.train_job(profile="smoke", image=IMAGE, runtime_dir=self.runtime, python_dir=self.python,
+                          inputs_dir=self.inputs, base_dir=self.base, seed=7, cuda_arch="8.9")
+        self.assertEqual(dict(j.env), {**RECIPE_ENV, "TORCH_CUDA_ARCH_LIST": "8.9"})
+        with self.assertRaises(ValueError):
+            job.train_job(profile="smoke", image=IMAGE, runtime_dir=self.runtime, python_dir=self.python,
+                          inputs_dir=self.inputs, base_dir=self.base, seed=7, cuda_arch="89")
         self.assertEqual((j.gpu, j.network, j.tmpfs, j.output_container, j.profile, j.training_seed),
                          (True, "none", ("/tmp",), "/out", "smoke", 7))
         self.assertEqual(j.framework["name"], registry.adapter(adapter.NAME).framework_name)

@@ -24,6 +24,8 @@ from gatedtrain.ainative.project import ArtifactRef
 from gatedtrain.ainative.stage import Proposal, StageContext
 from gatedtrain.ainative.trust_stages import SCHEMA_DEPLOYMENT, SCHEMA_MODEL_REF, SCHEMA_TRAIN_PART
 from gatedtrain.errors import Problem, Refused
+from gatedtrain.ext import launch
+from gatedtrain.ext.smoke import GPU_MEM_LIMIT_GB
 
 from . import job as job_mod
 from .answer import label_ok, normalise
@@ -60,7 +62,7 @@ JOB_POLL_S = 30.0
 # MM-38 smoke rules. Memory: memory.jsonl holds GB of 10^9 bytes (train_grpo.py make_memory_callback: `/ 1e9`), the
 # bound is in the same unit, so no conversion; the peak is the largest of the device memory in use at a step's end
 # and torch's peak allocated and reserved memory of the step.
-MEMORY_LIMIT_GB = 22.5
+MEMORY_LIMIT_GB = GPU_MEM_LIMIT_GB       # gatedtrain's default smoke bound (a 24 GB GPU's); the owner's is the host file's
 MEMORY_KEYS = ("device_used_gb_at_step_end", "torch_max_allocated_gb", "torch_max_reserved_gb")
 MIN_SAMPLES = 8
 INPUTS_DIR = "train-inputs"
@@ -135,7 +137,10 @@ def _meta(schema: str) -> dict:
 
 
 def _num(x: Any) -> bool:
-    return isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x)
+    try:
+        return isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x)
+    except OverflowError:                 # an integer too large for a float
+        return False
 
 
 def _read(ctx: StageContext, name: str, rule: str) -> dict:
@@ -496,7 +501,8 @@ class _JobStage:
 
     version = "0.1"
     needs = frozenset({"gpu"})
-    params = frozenset({"image", "runtime_dir", "python_dir"})
+    # `cuda_arch` and `memory_limit_gb` are optional (see `_params`): `memory_limit_gb` can only lower the owner's bound.
+    params = frozenset({"image", "runtime_dir", "python_dir", "cuda_arch", "memory_limit_gb"})
     PROFILE = ""
     RULE = ""
 
@@ -512,7 +518,31 @@ class _JobStage:
                 raise _refuse("TXT-4", f"params.{key}", f"{key} {v!r} is not an absolute path",
                               f"set {key} (the pipeline YAML says how)")
             out[key] = Path(v)
-        # The adapter's runtime (GATEDTRAIN_PACK_TEXT_GSM8K_RUNTIME), its venv's python and lock: plan refuses as
+        arch = ctx.params.get("cuda_arch")
+        if arch is not None:
+            if not job_mod.valid_cuda_arch(arch):
+                raise _refuse("TXT-4", "params.cuda_arch", f"cuda_arch {arch!r} is not a list of compute capabilities",
+                              "set cuda_arch to your GPU's compute capability such as 8.9, or leave it null")
+            out["cuda_arch"] = arch
+        # The memory bound is the owner's: the host file's `gpu_mem_limit_gb` (else gatedtrain's default). A pipeline,
+        # which an agent may have written, can ask for a lower bound and never for a higher one: a value above the
+        # owner's is refused, not applied.
+        owner = launch.owner_gpu_mem_limit_gb()
+        limit = ctx.params.get("memory_limit_gb")
+        if limit is None:
+            limit = owner
+        elif not (_num(limit) and limit > 0):
+            raise _refuse("TXT-4", "params.memory_limit_gb", f"memory_limit_gb {limit!r} is not a number above 0",
+                          "set memory_limit_gb to the GB (10^9 bytes) of GPU memory a smoke run may peak at, at most "
+                          "the owner's bound, or leave it null")
+        elif limit > owner:
+            raise _refuse("TXT-4", "params.memory_limit_gb", f"memory_limit_gb {limit:.15g} is above the owner's bound of "
+                          f"{owner:.15g} GB (the host file's gpu_mem_limit_gb, else gatedtrain's default); a pipeline can "
+                          "only lower it", f"set memory_limit_gb to at most {owner:.15g}, or leave it null; the owner "
+                          "raises the bound by setting gpu_mem_limit_gb in the host file")
+        out["memory_limit_gb"] = limit
+        out["owner_memory_limit_gb"] = owner
+        # The adapter's runtime (the host file's [packs.text-gsm8k] runtime_dir), its venv's python and lock: plan refuses as
         # train_job would, before a GPU job is submitted.
         job_mod.check_runtime(out["runtime_dir"])
         return out
@@ -557,7 +587,8 @@ class _JobStage:
         _write_bytes(inputs / "prompt.txt", job_mod.PROMPT_FILE.read_bytes())
         _write_bytes(inputs / "train_grpo.py", job_mod.TRAIN_SCRIPT.read_bytes())
         j = job_mod.train_job(profile=self.PROFILE, image=p["image"], python_dir=p["python_dir"], inputs_dir=inputs,
-                              base_dir=base_dir, seed=recipe["seed"], runtime_dir=p["runtime_dir"])
+                              base_dir=base_dir, seed=recipe["seed"], runtime_dir=p["runtime_dir"],
+                              cuda_arch=p.get("cuda_arch"))
         j = dataclasses.replace(j, output_dir=str(backend.new_output_dir(j.label, key=j.key())))
         job_id = backend.submit(j)
         status = backend.wait(job_id, poll_s=JOB_POLL_S)
@@ -614,8 +645,9 @@ def smoke_measures(samples: list, memory: list) -> dict:
             "seconds_per_step": sum(seconds) / len(seconds) if seconds else None}
 
 
-def smoke_reasons(m: dict) -> list[str]:
-    """The MM-38 reasons the measurements give, as sentences; [] is a PASS."""
+def smoke_reasons(m: dict, memory_limit_gb: float = MEMORY_LIMIT_GB) -> list[str]:
+    """The MM-38 reasons the measurements give, as sentences; [] is a PASS. `memory_limit_gb` is the bound the smoke
+    run was judged against (the owner's `memory_limit_gb` parameter, recorded in the smoke record)."""
     out = []
     if m["n_samples"] < MIN_SAMPLES:
         out.append(f"only {m['n_samples']} samples (at least {MIN_SAMPLES} are needed to judge)")
@@ -625,14 +657,15 @@ def smoke_reasons(m: dict) -> list[str]:
         d = m["n_distinct_completions"]
         if d < 2:
             out.append(f"{d} distinct completion{'' if d == 1 else 's'} across {m['n_samples']} samples")
-    if m["peak_gpu_mem_gb"] > MEMORY_LIMIT_GB:
-        out.append(f"peak GPU memory {m['peak_gpu_mem_gb']:g} GB is over the bound of {MEMORY_LIMIT_GB:g} GB")
+    if m["peak_gpu_mem_gb"] > memory_limit_gb:
+        out.append(f"peak GPU memory {m['peak_gpu_mem_gb']:g} GB is over the bound of {memory_limit_gb:g} GB")
     return out
 
 
 class Smoke(_JobStage):
-    """The recipe's smoke profile (10 steps) as a GPU job, then MM-38: refused when every reward is 0, when fewer
-    than 2 distinct completions appear across at least 8 samples, or when the peak GPU memory is over 22.5 GB."""
+    """The recipe's smoke profile (`PROFILE_STEPS`) as a GPU job, then MM-38: refused when every reward is 0, when fewer
+    than 2 distinct completions appear across `MIN_SAMPLES` samples, or when the peak GPU memory is over the bound
+    (`memory_limit_gb`, by default gatedtrain's)."""
 
     name = "gsm8k_smoke"
     inputs = {"base": SCHEMA_MODEL_REF, "train_set": SCHEMA_TRAIN_SET, "recipe": SCHEMA_RECIPE}
@@ -647,7 +680,7 @@ class Smoke(_JobStage):
         recipe, ts = self._recipe(ctx)
         return Proposal(self.name, f"smoke-train {recipe['profile_steps']['smoke']} GRPO steps on {ts['n']} rows in "
                         f"{p['image']}; refuse all-zero rewards, one repeated completion or peak GPU memory over "
-                        f"{MEMORY_LIMIT_GB:g} GB", {}, self._estimate())
+                        f"{p['memory_limit_gb']:g} GB", {}, self._estimate())
 
     def run(self, ctx: StageContext, decision: dict) -> dict[str, ArtifactRef]:
         backend, job_id = self._run_job(ctx)
@@ -660,7 +693,7 @@ class Smoke(_JobStage):
         except ValueError as exc:
             raise _refuse("MM-38", "smoke", f"the smoke output cannot be judged: {exc}",
                           "rerun smoke with the pack's train_grpo.py (without --no-sample-log)") from None
-        reasons = smoke_reasons(m)
+        reasons = smoke_reasons(m, self._params(ctx)["memory_limit_gb"])
         if reasons:
             raise _refuse("MM-38", "smoke", f"the smoke run {job_id} is degenerate or over the memory bound: "
                           f"{'; '.join(reasons)}",
@@ -668,7 +701,9 @@ class Smoke(_JobStage):
                           "completions within the GPU's memory")
         del m["all_rewards_zero"]
         out = {**_meta(SCHEMA_SMOKE), "verdict": "PASS", "reasons": [], "job_id": job_id, **m,
-               "memory_unit": "GB (10^9 bytes)", "memory_limit_gb": MEMORY_LIMIT_GB,
+               "memory_unit": "GB (10^9 bytes)",
+               "memory_limit_gb": self._params(ctx)["memory_limit_gb"],
+               "owner_memory_limit_gb": self._params(ctx)["owner_memory_limit_gb"],
                "base_sha256": ctx.inputs["base"].sha256, "train_set_sha256": ctx.inputs["train_set"].sha256,
                "recipe_sha256": ctx.inputs["recipe"].sha256}
         return {"smoke": ctx.project.write_artifact(ctx.stage or self.name, "smoke", out, SCHEMA_SMOKE)}
@@ -676,7 +711,10 @@ class Smoke(_JobStage):
     def check(self, ctx: StageContext, outputs: dict[str, ArtifactRef]) -> list[Problem]:
         s = ctx.project.read_artifact(outputs["smoke"])
         try:
-            again = smoke_reasons({**s, "all_rewards_zero": s.get("reward_mean") == 0})
+            bound = s["memory_limit_gb"]
+            if not (_num(bound) and 0 < bound <= launch.owner_gpu_mem_limit_gb()):
+                raise TypeError("memory_limit_gb")        # not a bound the owner's host allows (it may have been lowered)
+            again = smoke_reasons({**s, "all_rewards_zero": s.get("reward_mean") == 0}, bound)
         except (KeyError, TypeError):
             again = ["incomplete record"]
         if s.get("verdict") != "PASS" or s.get("reasons") != [] or again:
@@ -686,10 +724,11 @@ class Smoke(_JobStage):
 
 
 class Train(_JobStage):
-    """The recipe's full profile (100 steps) as a GPU job after a smoke PASS of the same inputs; the candidate is the
+    """The recipe's full profile (`PROFILE_STEPS`) as a GPU job after a smoke PASS of the same inputs; the candidate is the
     last checkpoint's six deployable files, handed off by the backend (each `o+r` in `o+x` directories)."""
 
     name = "gsm8k_train"
+    params = _JobStage.params - {"memory_limit_gb"}          # the memory bound is the smoke stage's
     inputs = {"base": SCHEMA_MODEL_REF, "train_set": SCHEMA_TRAIN_SET, "recipe": SCHEMA_RECIPE,
               "smoke": SCHEMA_SMOKE}
     outputs = {"model": SCHEMA_MODEL_REF}
@@ -705,6 +744,10 @@ class Train(_JobStage):
             if s.get(f"{key}_sha256") != ctx.inputs[key].sha256:
                 raise _refuse("MM-38", "inputs.smoke", f"the smoke run passed with another {key} than this "
                               "training run's", "rerun gsm8k_smoke on these inputs")
+        bound = s.get("memory_limit_gb")           # the bound it was judged against must still be one the owner allows
+        if not (_num(bound) and 0 < bound <= launch.owner_gpu_mem_limit_gb()):
+            raise _refuse("MM-38", "inputs.smoke", f"the smoke run was judged against a memory bound ({bound!r} GB) "
+                          "that the host's gpu_mem_limit_gb no longer allows", "rerun gsm8k_smoke")
 
     def plan(self, ctx: StageContext) -> Proposal:
         self._smoke_passed(ctx)

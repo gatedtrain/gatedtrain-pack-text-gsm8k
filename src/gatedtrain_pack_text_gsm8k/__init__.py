@@ -1,3 +1,3 @@
 """GSM8K text scenario pack for gatedtrain."""
 
-__version__ = "0.3.0"
+__version__ = "0.3.1"
