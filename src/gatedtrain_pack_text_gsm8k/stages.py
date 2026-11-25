@@ -43,8 +43,16 @@ DEPLOYABLE = ("config.json", "generation_config.json", "model.safetensors", "tok
 # A source without it (the hub's Qwen3-0.6B at the pinned commit) has its template as the string `chat_template`
 # of tokenizer_config.json; ChooseTaskAndBase writes that string to the base copy's chat_template.jinja.
 TEMPLATE = "chat_template.jinja"
-SAMPLER = {"name": "vllm", "temperature": 0.7, "top_p": 1.0, "max_new_tokens": 1024, "enable_thinking": False}
-EVAL_SEEDS = [11, 12, 13, 14]
+# The deployment decodes greedily by default (temperature 0, one evaluation seed, one sample per item): gatedtrain
+# registers it as `decoding: greedy` and the keeper checks it with a control seed (AN-26). Sampled decoding
+# (temperature 0.7 over four seeds, the pack's 0.1.0 mode) stays available with `decoding: sampled`.
+GREEDY_SAMPLER = {"name": "vllm", "decoding": "greedy", "temperature": 0, "top_p": 1.0, "max_new_tokens": 1024,
+                  "enable_thinking": False}
+GREEDY_SEEDS = [11]
+SAMPLED_SAMPLER = {"name": "vllm", "temperature": 0.7, "top_p": 1.0, "max_new_tokens": 1024, "enable_thinking": False}
+SAMPLED_SEEDS = [11, 12, 13, 14]
+DECODINGS = {"greedy": (GREEDY_SAMPLER, GREEDY_SEEDS), "sampled": (SAMPLED_SAMPLER, SAMPLED_SEEDS)}
+SAMPLER, EVAL_SEEDS = GREEDY_SAMPLER, GREEDY_SEEDS
 # train_grpo.py PROFILES (max_steps); `train_job` passes no --max-steps, so these are the only steps a job runs.
 PROFILE_STEPS = {"smoke": 10, "full": 100}
 TRAINING_SEED = 42                      # train_grpo.py COMMON["seed"]
@@ -276,7 +284,7 @@ class ChooseTaskAndBase:
     inputs = {"profile": SCHEMA_PROFILE}
     outputs = {"deployment": SCHEMA_DEPLOYMENT, "base": SCHEMA_MODEL_REF}
     needs: frozenset[str] = frozenset()
-    params = frozenset({"base_model_dir"})
+    params = frozenset({"base_model_dir", "decoding"})
     trains = False
 
     def _source(self, ctx: StageContext) -> Path:
@@ -320,19 +328,30 @@ class ChooseTaskAndBase:
                           "tokenizer_config.json has no non-empty string `chat_template`", fix)
         return template.encode("utf-8")
 
+    @staticmethod
+    def _decoding(ctx: StageContext) -> tuple[dict, list]:
+        d = ctx.params.get("decoding", "greedy")
+        if d not in DECODINGS:
+            raise _refuse("TXT-2", "params.decoding", f"decoding {d!r} is not one of {', '.join(DECODINGS)}",
+                          "set decoding to greedy (the default) or sampled")
+        sampler, seeds = DECODINGS[d]
+        return dict(sampler), list(seeds)
+
     def plan(self, ctx: StageContext) -> Proposal:
         n = ctx.project.read_artifact(ctx.inputs["profile"]).get("n")
         src = self._source(ctx)
+        sampler, seeds = self._decoding(ctx)
         how = "" if (src / TEMPLATE).is_file() else \
             f" ({TEMPLATE} written from the chat_template string of tokenizer_config.json)"
         return Proposal(self.name, f"task: GSM8K final numeric answer ({n} training rows); base model: "
                         f"{ARCHITECTURE} from {src}, its {len(DEPLOYABLE)} deployable files copied for the keeper"
                         f"{how}",
-                        {"task": "gsm8k", "sampler": dict(SAMPLER), "eval_seeds": list(EVAL_SEEDS)},
+                        {"task": "gsm8k", "sampler": sampler, "eval_seeds": seeds},
                         {"gpu_hours": 0.0})
 
     def run(self, ctx: StageContext, decision: dict) -> dict[str, ArtifactRef]:
         src = self._source(ctx)
+        sampler, seeds = self._decoding(ctx)
         out = _backend(ctx, self.name).new_output_dir(BASE_DIR)
         files = []
         for n in DEPLOYABLE:
@@ -344,7 +363,7 @@ class ChooseTaskAndBase:
                 sha = _copy(src / n, out / n)
             files.append({"path": str(out / n), "sha256": sha})
         stage = ctx.stage or self.name
-        deployment = {**_meta(SCHEMA_DEPLOYMENT), "sampler": dict(SAMPLER), "eval_seeds": list(EVAL_SEEDS)}
+        deployment = {**_meta(SCHEMA_DEPLOYMENT), "sampler": sampler, "eval_seeds": seeds}
         base = {**_meta(SCHEMA_MODEL_REF), "generator": GENERATOR, "label": "base", "files": files}
         return {"deployment": ctx.project.write_artifact(stage, "deployment", deployment, SCHEMA_DEPLOYMENT),
                 "base": ctx.project.write_artifact(stage, "base", base, SCHEMA_MODEL_REF)}
@@ -353,7 +372,8 @@ class ChooseTaskAndBase:
         fix = "rerun gsm8k_choose_task_and_base"
         base = ctx.project.read_artifact(outputs["base"])
         dep = ctx.project.read_artifact(outputs["deployment"])
-        if dep.get("sampler") != SAMPLER or dep.get("eval_seeds") != EVAL_SEEDS:
+        sampler, seeds = self._decoding(ctx)
+        if dep.get("sampler") != sampler or dep.get("eval_seeds") != seeds:
             return [Problem("TXT-2", "deployment", "the deployment is not the pack's sampler and seeds", fix)]
         if base.get("generator") != GENERATOR or base.get("label") != "base":
             return [Problem("TXT-2", "base", f"the base reference is not a {GENERATOR} base model", fix)]

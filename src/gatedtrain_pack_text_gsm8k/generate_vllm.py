@@ -28,7 +28,7 @@ import sys
 
 PROMPT = ("Solve the following math problem step by step. Put your final numerical answer after 'The answer is'."
           "\n\nProblem: {}")
-SAMPLER_KEYS = frozenset({"name", "temperature", "top_p", "max_new_tokens", "enable_thinking"})
+SAMPLER_KEYS = frozenset({"name", "temperature", "top_p", "max_new_tokens", "enable_thinking", "decoding"})
 PREDICTIONS = "predictions.jsonl"
 
 _ENV_DEFAULTS = (
@@ -65,6 +65,13 @@ def _check_sampler(doc) -> tuple[dict, list]:
     for key in ("temperature", "top_p"):
         if not _number(sampler.get(key)):
             raise _Refusal(f"the sampler's {key} must be a number")
+    if "decoding" in sampler and sampler["decoding"] != "greedy":
+        raise _Refusal("the sampler's decoding must be 'greedy' when present")
+    if sampler.get("decoding") == "greedy":
+        if sampler["temperature"] != 0 or sampler["top_p"] != 1:
+            raise _Refusal("a greedy sampler has temperature 0 and top_p 1")
+    elif sampler["temperature"] == 0:
+        raise _Refusal("temperature 0 is greedy decoding and needs the sampler's decoding to be 'greedy'")
     max_new = sampler.get("max_new_tokens")
     if isinstance(max_new, bool) or not isinstance(max_new, int) or max_new < 1:
         raise _Refusal("the sampler's max_new_tokens must be a positive integer")
@@ -96,16 +103,21 @@ def main(argv: list[str] | None = None) -> int:
         os.environ.setdefault(key, value)
     from vllm import LLM, SamplingParams
 
+    greedy = sampler.get("decoding") == "greedy"
+    # Greedy decoding ignores the seed. The keeper runs it under a control seed too and compares the predictions
+    # (gatedtrain AN-26), so a later pass must not differ from the first: prefix caching is off, and requests run one
+    # at a time (max_num_seqs 1) so that the numerics do not depend on which requests share a batch.
+    extra = {"enable_prefix_caching": False, "max_num_seqs": 1} if greedy else {}
     llm = LLM(model=args.model, dtype="bfloat16", generation_config="vllm", max_model_len=2048,
-              gpu_memory_utilization=0.85, enforce_eager=True, seed=0)
+              gpu_memory_utilization=0.85, enforce_eager=True, seed=0, **extra)
     tokenizer = llm.get_tokenizer()
     prompts = [tokenizer.apply_chat_template([{"role": "user", "content": PROMPT.format(item["input"])}],
                                              tokenize=False, add_generation_prompt=True, enable_thinking=False)
                for item in items]
     lines = []
     for seed in seeds:
-        params = SamplingParams(temperature=sampler["temperature"], top_p=sampler["top_p"],
-                                max_tokens=sampler["max_new_tokens"], seed=seed)
+        params = SamplingParams(temperature=float(sampler["temperature"]), top_p=float(sampler["top_p"]),
+                                max_tokens=sampler["max_new_tokens"], **({} if greedy else {"seed": seed}))
         outputs = llm.generate(prompts, params)
         if len(outputs) != len(items):
             raise RuntimeError(f"vLLM returned {len(outputs)} outputs for {len(items)} prompts")

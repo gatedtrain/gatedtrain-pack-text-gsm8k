@@ -1,6 +1,6 @@
 # gatedtrain-pack-text-gsm8k
 
-A scenario pack for [gatedtrain](https://github.com/gatedtrain/gatedtrain) (`gatedtrain>=0.5,<0.6`): it teaches a small
+A scenario pack for [gatedtrain](https://github.com/gatedtrain/gatedtrain) (`gatedtrain>=0.6,<0.7`): it teaches a small
 language model grade-school math and lets gatedtrain decide, by a rule fixed before training, whether the trained
 model really is better.
 
@@ -43,9 +43,37 @@ flowchart LR
 
 The container gets the sealed questions, never their labels; the keeper scores the answers itself.
 
-## A tested run
+## Changes in 0.2.0
 
-One run on one 24 GB GPU, with 7,074 GSM8K training-split rows for training and 399 rows sealed for the test:
+- Needs gatedtrain 0.6 (the pack and the VLM pack can now share one keeper environment).
+- **Greedy decoding is the default** (`decoding: greedy`, temperature 0, top_p 1.0, one evaluation seed, one sample per
+  item); `decoding: sampled` in the `choose_task_and_base` params keeps the 0.1.0 mode (temperature 0.7, four seeds).
+  See "Decoding". No GPU end to end run of this release was made: the run below is the 0.1.0 run (sampled decoding),
+  and the greedy path is covered by the CPU tests (fake containers) and the determinism probe described below.
+
+## Decoding
+
+gatedtrain 0.6 registers greedy decoding as an explicit mode and its keeper checks it: every sealed item is generated
+once more under a seed the registration does not name, and an attempt whose predictions differ is refused after it
+spent its alpha (AN-26). vLLM's default batching is not deterministic, so the batch generator runs greedy decoding one
+request at a time (`max_num_seqs=1`, prefix caching off). Probe of this pack (the keeper's container flags and eval
+environment, vLLM 0.31.0, 399 GSM8K rows from the training part of an earlier project, never sealed items, two seeds in one
+call, 1,024 new tokens):
+
+| Model | Default batching: items that differ | `max_num_seqs=1`: items that differ | Time for both passes |
+|---|---|---|---|
+| Base (Qwen3-0.6B) | 239/399 (59.9 %) | **0/399** | 17 min 42 s |
+| Trained (100 GRPO steps) | 205/399 (51.4 %) | **0/399** | 17 min 33 s |
+
+**Time limit.** One request at a time is slow: about 17.5 minutes per arm against the generator's limit of 20 minutes
+(the keeper allows at most 1,200 s), a margin of about 10 %. A slower GPU or a busier host can exceed it; the attempt is
+then a crash that costs its alpha. Use `decoding: sampled` (under two minutes per arm in the default-batching probe) when the margin is too small for
+your host. A change of the generator, the vLLM version or the GPU needs the probe again.
+
+## A tested run (0.1.0, sampled decoding)
+
+One run on one 24 GB GPU, with 7,074 GSM8K training-split rows for training and 399 rows sealed for the test. Scores are
+at temperature 0.7 over four seeds, so they are not the scores of the greedy mode:
 
 | | Score on the sealed questions |
 |---|---|
@@ -58,7 +86,7 @@ About 0.64 GPU hours in all (training 0.51 h). Your numbers will differ with oth
 ## What you need
 
 - Linux x86_64, one NVIDIA GPU, a CUDA 13.0 driver; CPython 3.12 for both venvs.
-- gatedtrain 0.5 with a keeper and rootless Docker for the owner and the keeper (see gatedtrain's
+- gatedtrain 0.6 with a keeper and rootless Docker for the owner and the keeper (see gatedtrain's
   [AI-native projects](https://github.com/gatedtrain/gatedtrain/blob/main/docs/ai-native.md) guide).
 - Root, once, to install the pack in the keeper's environment and to build the keeper's eval tree.
 
@@ -68,7 +96,7 @@ The pack is not on PyPI. Install it from this repository at a release tag, into 
 run, as the owner:
 
 ```sh
-pip install "gatedtrain-pack-text-gsm8k @ git+https://github.com/gatedtrain/gatedtrain-pack-text-gsm8k@v0.1.0"
+pip install "gatedtrain-pack-text-gsm8k @ git+https://github.com/gatedtrain/gatedtrain-pack-text-gsm8k@v0.2.0"
 ```
 
 The keeper's own environment needs the same pack at the same version (see "The keeper's environment" below).
@@ -173,7 +201,7 @@ installs it from this repository at the same tag as the owner's instead:
 
 ```sh
 sudo /opt/gatedtrain-keeper/venv/bin/pip install --no-cache-dir \
-    "gatedtrain-pack-text-gsm8k @ git+https://github.com/gatedtrain/gatedtrain-pack-text-gsm8k@v0.1.0"
+    "gatedtrain-pack-text-gsm8k @ git+https://github.com/gatedtrain/gatedtrain-pack-text-gsm8k@v0.2.0"
 ```
 
 Restart the keeper after installing or upgrading the pack.
@@ -211,6 +239,7 @@ the copy to `gatedtrain project create --pipeline <copy> --keeper <socket>`:
 | Param | Value |
 |---|---|
 | `choose_task_and_base.base_model_dir` | the Qwen3-0.6B directory fetched above, e.g. `/srv/gatedtrain/models/Qwen3-0.6B` |
+| `choose_task_and_base.decoding` | optional: `greedy` (the default) or `sampled` |
 | `smoke.image`, `train.image` | the CUDA devel image pinned by digest, held by the owner's rootless daemon |
 | `smoke.runtime_dir`, `train.runtime_dir` | the runtime directory holding the owner-built `.venv`, e.g. `/srv/gatedtrain/runtime-gsm8k`; the value of `GATEDTRAIN_PACK_TEXT_GSM8K_RUNTIME` |
 | `smoke.python_dir`, `train.python_dir` | the directory of uv-managed interpreters the venv was made from, e.g. `/srv/gatedtrain/python` |
