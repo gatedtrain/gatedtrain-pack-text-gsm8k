@@ -8,8 +8,9 @@ gatedtrain-recipe-trl-grpo-gsm8k (`rows.py`), an evaluator row for the pack's sc
 The row differs from the recipe's in three ways: no spec binding (the pack's stages bind the inputs, not an ext
 spec), the trainer id `rl.trl_grpo@0.1`, and the input root `{output_root}`, since the backend's directories (the
 job's inputs, the base model) live under `{output_root}/gatedtrain-<hex>/`. The other input roots, the interpreter,
-its trees and the scan skips are rowkit's host rows for the runtime directory: `GATEDTRAIN_PACK_TEXT_GSM8K_RUNTIME`,
-else this package's `runtime/` (which holds the lock the owner builds the venv from). gatedtrain's
+its trees and the scan skips are rowkit's host rows for the runtime directory: the host file's
+`[packs.text-gsm8k] runtime_dir` (the variable `GATEDTRAIN_PACK_TEXT_GSM8K_RUNTIME` is deprecated), else this package's
+`runtime/` (which holds the lock the owner builds the venv from). gatedtrain's
 `GATEDTRAIN_EXT_*` overrides move them for another layout.
 
 Runs of this adapter are read by the pack's own stages; `gatedtrain ext-collect` does not read them, so the class's

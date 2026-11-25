@@ -7,8 +7,8 @@ the venv, is the mount: the adapter row's credential-scan skip names `<runtime>/
 sub-directory of a mount but always walks the mount root (a venv holds library code named like `credentials`). The inputs are mounted read-only under /inputs: the training
 file, the prompt file, the script and the base model directory. The output is /out; /tmp is a tmpfs; no network.
 
-The runtime directory `<runtime>` is the adapter's (adapter.py `RUNTIME`): `GATEDTRAIN_PACK_TEXT_GSM8K_RUNTIME`, else
-this package's `runtime/`. It holds copies of `runtime/pyproject.toml` and `runtime/uv.lock`; the owner builds the
+The runtime directory `<runtime>` is the adapter's (adapter.py `RUNTIME`): the host file's `[packs.text-gsm8k] runtime_dir`
+(the variable `GATEDTRAIN_PACK_TEXT_GSM8K_RUNTIME` is a deprecated workaround), else this package's `runtime/`. It holds copies of `runtime/pyproject.toml` and `runtime/uv.lock`; the owner builds the
 venv there on the host (no GPU), without bytecode, from the uv-managed CPython `PYTHON_VERSION` in `<python>`
 (`<platform>` is the platform tag `uv python install` gives the directory, e.g. what `uv python find` prints):
 
