@@ -123,7 +123,7 @@ class EvalRequirementsTest(unittest.TestCase):
 
     def test_pack_dependencies_unchanged(self):
         self.assertEqual(tomllib.loads((REPO / "pyproject.toml").read_text())["project"]["dependencies"],
-                         ["gatedtrain>=0.5,<0.6"])
+                         ["gatedtrain>=0.6,<0.7"])
 
 
 class ReadmeTest(unittest.TestCase):

@@ -39,7 +39,9 @@ IMAGE = ("docker.io/nvidia/cuda:13.0.3-devel-ubuntu24.04"
 FAKE_GID = 2**31 - 3                     # the owner's primary group: no Docker socket's group on any host
 TREE = "cpython-3.12.16-linux-x86_64-gnu"
 CLOCK = datetime.datetime(2026, 11, 23, tzinfo=datetime.timezone.utc)
-SAMPLER = {"name": "vllm", "temperature": 0.7, "top_p": 1.0, "max_new_tokens": 1024, "enable_thinking": False}
+SAMPLER = {"name": "vllm", "decoding": "greedy", "temperature": 0, "top_p": 1.0, "max_new_tokens": 1024,
+           "enable_thinking": False}
+SAMPLED = {"name": "vllm", "temperature": 0.7, "top_p": 1.0, "max_new_tokens": 1024, "enable_thinking": False}
 
 
 
@@ -176,7 +178,7 @@ class StageShapeTests(unittest.TestCase):
                          ["gsm8k_choose_task_and_base", "gsm8k_build_train_set", "gsm8k_write_recipe", "gsm8k_smoke",
                           "gsm8k_train"])
         self.assertEqual(ChooseTaskAndBase.outputs, {"deployment": SCHEMA_DEPLOYMENT, "base": SCHEMA_MODEL_REF})
-        self.assertEqual(ChooseTaskAndBase.params, frozenset({"base_model_dir"}))
+        self.assertEqual(ChooseTaskAndBase.params, frozenset({"base_model_dir", "decoding"}))
         self.assertEqual(WriteRecipe.params, frozenset({"profile_steps"}))
         for cls in (Smoke, Train):
             self.assertEqual(cls.needs, frozenset({"gpu"}))
@@ -202,7 +204,9 @@ class BaseTests(_Layout):
             self.assertEqual(data, (self.hub / Path(f["path"]).name).read_bytes())
             self.assertEqual(f["sha256"], "sha256:" + hashlib.sha256(data).hexdigest())
         dep = self.proj.read_artifact(out["deployment"])
-        self.assertEqual((dep["sampler"], dep["eval_seeds"]), (SAMPLER, [11, 12, 13, 14]))
+        self.assertEqual((dep["sampler"], dep["eval_seeds"]), (SAMPLER, [11]))
+        self.assertEqual(SAMPLER, {"name": "vllm", "decoding": "greedy", "temperature": 0, "top_p": 1.0,
+                                   "max_new_tokens": 1024, "enable_thinking": False})
         self.assertEqual(ChooseTaskAndBase().check(ctx, out), [])
         # A re-run leaves identical copies as they are (same inode: a job that mounts them keeps its key).
         inode = os.stat(base["files"][2]["path"]).st_ino
@@ -296,6 +300,29 @@ class BaseTests(_Layout):
         self.assertEqual(prop.estimate, {"gpu_hours": 0.0})
         self.assertEqual(prop.choices["sampler"], SAMPLER)
         self.assertEqual(list(self.out_root.iterdir()), [])
+
+
+class DecodingTests(_Layout):
+    def chosen(self, **params):
+        tp = self.train_part()
+        prof = ProfileData().run(self.ctx("profile_data", {"train_part": tp}), {})["profile"]
+        return prof, self.ctx("choose_task_and_base", {"profile": prof}, {"base_model_dir": str(self.hub), **params})
+
+    def test_sampled_decoding_stays_available(self):
+        prof, ctx = self.chosen(decoding="sampled")
+        out = ChooseTaskAndBase().run(ctx, {})
+        dep = self.proj.read_artifact(out["deployment"])
+        self.assertEqual((dep["sampler"], dep["eval_seeds"]), (SAMPLED, [11, 12, 13, 14]))
+        self.assertEqual(stages.SAMPLED_SAMPLER, SAMPLED)
+        self.assertEqual(ChooseTaskAndBase().check(ctx, out), [])
+        greedy_ctx = self.ctx("choose_task_and_base", {"profile": prof}, {"base_model_dir": str(self.hub)})
+        self.assertEqual(len(ChooseTaskAndBase().check(greedy_ctx, out)), 1)      # not the chosen deployment
+
+    def test_unknown_decoding_refused(self):
+        prof, ctx = self.chosen(decoding="beam")
+        with self.assertRaises(Refused) as cm:
+            ChooseTaskAndBase().plan(ctx)
+        self.assertRule(cm, "TXT-2", "decoding")
 
 
 class TrainSetAndRecipeTests(_Layout):
