@@ -184,6 +184,11 @@ class ReadmeTest(unittest.TestCase):
         self.assertLess(same_user, separate)
         self.assertNotIn("sudo", flat[same_user:separate].replace("no sudo", "").replace("without sudo", ""))
 
+    def test_readme_names_the_host_file_key_not_the_function_as_a_key(self):
+        """`owner_gpu_mem_limit_gb` is a function of gatedtrain; the host file's key is `gpu_mem_limit_gb`."""
+        flat = " ".join(self.text.split())
+        self.assertIn("the function `launch.owner_gpu_mem_limit_gb` (it reads the host file's key `gpu_mem_limit_gb`)", flat)
+
     def test_readme_host_commands(self):
         for needle in ("--inference-image", "--eval-requirements", "--eval-python", "uv sync --frozen",
                        "env -u UV_COMPILE_BYTECODE", "100,000", "cooperative"):
