@@ -380,6 +380,10 @@ changed.
   `gatedtrain setup eval-tree` prints, from this pack's `eval-requirements.txt` (see "The keeper's eval tree"); before,
   only the root script of `gatedtrain setup host` built it. A separate-user keeper still needs that root script.
 - Not changed: the trainer image, the pack's decoding and its other params.
+- Checked on a GPU (one RTX 4090, gatedtrain 0.7.2 from source, same-user keeper, eval tree built by `gatedtrain setup
+  eval-tree`): smoke, train (100 steps), sealed evaluation and gate ran end to end, gate PASS, base 0.6642 to trained
+  0.7794 on 399 sealed items (a single run; the report states "same-user keeper: procedure followed; sealed data not
+  protected from the user's account"). The tree was built by the version of the script before its last review fixes.
 
 ### 0.3.1
 
