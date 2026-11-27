@@ -123,7 +123,7 @@ class EvalRequirementsTest(unittest.TestCase):
 
     def test_pack_dependencies_unchanged(self):
         self.assertEqual(tomllib.loads((REPO / "pyproject.toml").read_text())["project"]["dependencies"],
-                         ["gatedtrain>=0.7.1,<0.8"])
+                         ["gatedtrain>=0.7.2,<0.8"])
 
     def test_pack_version_is_one_value(self):
         """`__version__` and the project version are the same release (the README and the tag name it)."""
@@ -153,7 +153,7 @@ class ReadmeTest(unittest.TestCase):
         """The README names the gatedtrain release the pack needs and the two keeper modes, so a result is described
         with the mode that produced it (engineering rule 7)."""
         flat = " ".join(self.text.split())
-        self.assertIn("`gatedtrain>=0.7.1,<0.8`", flat)
+        self.assertIn("`gatedtrain>=0.7.2,<0.8`", flat)
         for needle in ("Changes in 0.3.0", "same-user", "separate-user", "docs/sudo-free-quickstart.md"):
             self.assertIn(needle, flat)
 
@@ -168,6 +168,21 @@ class ReadmeTest(unittest.TestCase):
                        "openai/gsm8k"):
             self.assertIn(needle, flat)
         self.assertNotIn("(or set GATEDTRAIN_PACK_TEXT_GSM8K_RUNTIME)", flat)
+
+    def test_readme_eval_tree_has_a_same_user_path_without_sudo(self):
+        """0.3.2: a same-user keeper builds the eval tree with `gatedtrain setup eval-tree` (no sudo); the root script of
+        `setup host` stays for a separate-user keeper, and the README says which mode each is for."""
+        flat = " ".join(self.text.split())
+        for needle in ("gatedtrain setup eval-tree", "--requirements", "--python-version 3.12",
+                       "Same-user keeper (the default, no sudo)", "Separate-user keeper (one sudo)",
+                       "A separate-user keeper refuses a tree you own", "restart the keeper after any change",
+                       "gatedtrain>=0.7.2,<0.8"):
+            self.assertIn(needle, flat)
+        self.assertNotIn("Root, once, to build the keeper's eval tree", flat)       # the 0.3.1 sentence
+        same_user = flat.index("Same-user keeper (the default, no sudo)")
+        separate = flat.index("Separate-user keeper (one sudo)")
+        self.assertLess(same_user, separate)
+        self.assertNotIn("sudo", flat[same_user:separate].replace("no sudo", "").replace("without sudo", ""))
 
     def test_readme_host_commands(self):
         for needle in ("--inference-image", "--eval-requirements", "--eval-python", "uv sync --frozen",
