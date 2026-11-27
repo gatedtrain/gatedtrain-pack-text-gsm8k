@@ -1,6 +1,6 @@
 # gatedtrain-pack-text-gsm8k
 
-A scenario pack for [gatedtrain](https://github.com/gatedtrain/gatedtrain) (`gatedtrain>=0.7.1,<0.8`): it teaches a small
+A scenario pack for [gatedtrain](https://github.com/gatedtrain/gatedtrain) (`gatedtrain>=0.7.2,<0.8`): it teaches a small
 language model grade-school math and lets gatedtrain decide, by a rule fixed before training, whether the trained
 model really is better.
 
@@ -105,8 +105,12 @@ About 0.64 GPU hours in all (training 0.51 h). Your numbers will differ with oth
   [Quickstart without sudo](https://github.com/gatedtrain/gatedtrain/blob/main/docs/sudo-free-quickstart.md) and
   [AI-native projects](https://github.com/gatedtrain/gatedtrain/blob/main/docs/ai-native.md) guides; `gatedtrain setup
   check` lists what the host must provide).
-- Root, once, to build the keeper's eval tree (`gatedtrain setup host`), and in a separate-user keeper also to install
-  the pack in the keeper's environment. A same-user keeper needs no sudo for the pack itself.
+- A same-user keeper (the default) needs no sudo for the pack: you build the keeper's eval tree yourself with
+  `gatedtrain setup eval-tree` ([the keeper's eval tree](#the-keepers-eval-tree)), and the pack is installed in the
+  environment the keeper runs from. A separate-user keeper needs root, once, for the root-owned eval tree
+  (`gatedtrain setup host`) and to install the pack in the keeper's environment. The host's own prerequisites (rootless
+  Docker, `uidmap`, the NVIDIA driver and CDI specification; `gatedtrain setup check` lists them) need an administrator
+  on a machine that lacks them.
 
 ## Keeper modes
 
@@ -244,12 +248,31 @@ Restart the keeper after installing or upgrading the pack.
 
 ## The keeper's eval tree
 
-The keeper's inference container runs `generate_vllm.py` with the python of a root-owned eval venv. The pack ships the
-inputs for it: `eval-requirements.txt` (hash-pinned, binary wheels only: vllm 0.31.0, transformers 5.17.0,
+The keeper's inference container runs `generate_vllm.py` with the python of an eval venv that the keeper mounts
+read-only. The keeper accepts a tree only when every node and every directory above it is owned by the keeper's own uid
+or by root and writable by no one else. The pack ships the inputs for it: `eval-requirements.txt` (hash-pinned, binary wheels only: vllm 0.31.0, transformers 5.17.0,
 torch 2.13.0 and their locked dependencies, the versions of the runtime lock) and the lock it was exported from
 (`eval/pyproject.toml`, `eval/uv.lock`; the comment in the pyproject says how to regenerate it). Find them in the
-installed package, then print the host setup script and read it before running it as root (`gatedtrain setup host
---help` lists the other flags):
+installed package.
+
+**Same-user keeper (the default, no sudo).** Print the build script, read it, run it as yourself (it needs `uv`), then
+give the keeper the options it prints; the script changes only files under its root, `gatedtrain-keeper-eval` beside
+the keeper's state directory (`--root DIR` changes it):
+
+```sh
+gatedtrain setup eval-tree \
+    --requirements <site-packages>/gatedtrain_pack_text_gsm8k/eval-requirements.txt \
+    --python-version 3.12 > gatedtrain-eval-tree.sh
+sh gatedtrain-eval-tree.sh
+gatedtrain setup keeper --mode same-user --inference-image <image ID> \
+    --eval-tree <root>/python --eval-tree <root>/eval-venv --eval-python <root>/eval-venv/bin/python
+```
+
+The tree is yours, so like the rest of a same-user keeper it is not sealed from your account, and the keeper checks it at
+start only (restart the keeper after any change). A separate-user keeper refuses a tree you own.
+
+**Separate-user keeper (one sudo).** Print the host setup script and read it before running it as root (`gatedtrain setup
+host --help` lists the other flags):
 
 ```sh
 gatedtrain setup host \
@@ -348,7 +371,17 @@ and re-checked, not sealed.
 
 ## Changes
 
-### 0.3.1 (Unreleased)
+### 0.3.2 (Unreleased)
+
+Needs gatedtrain 0.7.2 (`gatedtrain>=0.7.2,<0.8`), which adds `gatedtrain setup eval-tree`. No code of the pack
+changed.
+
+- **No sudo for the pack in a same-user keeper.** The keeper's eval tree is built by the user-level script
+  `gatedtrain setup eval-tree` prints, from this pack's `eval-requirements.txt` (see "The keeper's eval tree"); before,
+  only the root script of `gatedtrain setup host` built it. A separate-user keeper still needs that root script.
+- Not changed: the trainer image, the pack's decoding and its other params.
+
+### 0.3.1
 
 Needs gatedtrain 0.7.1 (`gatedtrain>=0.7.1,<0.8`): it uses the host file's `[packs]` tables, `owner_gpu_mem_limit_gb` and the
 keeper's `--eval-python`.
